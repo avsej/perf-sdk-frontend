@@ -32,10 +32,6 @@ import { usePerformanceBarChart } from '@/src/shared/charts/use-performance-bar-
 
 // Using shared CustomLegend component
 
-// Non-release bars are drawn in a distinct color (see snapshotBarColors): moving
-// snapshot tags (main, and each 3.11.x-style branch in its own color) at the end
-// of the chart, and gerrit/PR builds inline.
-
 interface PerformanceBarChartProps {
   title: string
   description?: string
@@ -505,7 +501,7 @@ export default function PerformanceBarChart({
                 : // Standard view details
                   processedData.map((item, i) => (
                     <Link
-                      href={`/versions/${encodeURIComponent(item.name)}/runs?metric=${encodeURIComponent(metric)}&sdk=${encodeURIComponent(sdkVersion || "")}`}
+                      href={`/versions/${encodeURIComponent(item.name)}/runs?metric=${encodeURIComponent(metric)}&sdk=${encodeURIComponent(sdkVersion || "")}${item.runIds?.length ? `&runIds=${encodeURIComponent(item.runIds.join(","))}` : ""}`}
                       key={i}
                       className="flex flex-col items-center p-3 rounded-md border hover:bg-slate-50 transition-colors"
                       style={{ borderColor: multiClusterMode ? item.clusterColor.replace("0.7", "0.3") : undefined }}
