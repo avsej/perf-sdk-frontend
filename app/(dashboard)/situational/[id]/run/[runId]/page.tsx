@@ -15,6 +15,7 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/src/components/ui/ta
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/src/components/ui/tooltip"
 import { Popover, PopoverContent, PopoverTrigger } from "@/src/components/ui/popover"
 import PerformanceGraph from "@/src/components/shared/performance-graph"
+import PerCoreCpuChart from "@/src/components/shared/per-core-cpu-chart"
 import { MetricCardsSkeleton } from "@/src/components/shared/skeletons/PageSkeletons"
 import ObservabilityBox from "@/src/components/shared/observability-box"
 import JsonViewer from "@/src/components/shared/json-viewer"
@@ -517,6 +518,8 @@ export default function SituationalRunDetailPage({
           height={400}
           graphId="runGraph"
         />
+
+        <PerCoreCpuChart runId={runData.id} />
 
         {/* Tabs for additional information (depend on the awaited run metadata) */}
         {!isLoading && Boolean(data) && (

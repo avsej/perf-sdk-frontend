@@ -13,6 +13,7 @@ import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/src/
 import { Popover, PopoverContent, PopoverTrigger } from "@/src/components/ui/popover"
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/src/components/ui/table"
 import PerformanceGraph from "@/src/components/shared/performance-graph"
+import PerCoreCpuChart from "@/src/components/shared/per-core-cpu-chart"
 import ObservabilityBox from "@/src/components/shared/observability-box"
 import JsonViewer from "@/src/components/shared/json-viewer"
 import { formatDate } from "@/src/lib/utils/formatting"
@@ -221,6 +222,8 @@ export default function RunDetailClient({ runData, runMetrics, runBuckets }: Run
             />
           </CardContent>
         </Card>
+
+        <PerCoreCpuChart runId={runData.id} metrics={runMetrics} buckets={runBuckets} />
 
         {/* Tabs */}
         <Tabs value={activeTab} onValueChange={setActiveTab} className="w-full">
