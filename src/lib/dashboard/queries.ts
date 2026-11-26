@@ -210,7 +210,8 @@ export function createSystemMetricInput(
     graphType: "Simplified",
     multipleResultsHandling: "Merged", 
     mergingType: mergingType,  // Now uses correct mergingType per metric
-    trimmingSeconds: 20,
+    // Aggregate full-run samples; historical metrics rows may have NULL time_offset_secs.
+    trimmingSeconds: 0,
     excludeSnapshots,
     excludeGerrit,
     filterRuns: "All"
