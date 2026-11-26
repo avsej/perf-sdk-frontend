@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { getDatabaseService, getDashboardService } from '@/src/lib/database-connection-pool'
+import { getSystemMetricInfo } from '@/src/lib/config/constants'
 import { extractChartAggregatedValue, UUID_PATTERN } from '@/src/lib/dashboard/graph-builders'
 import { logger } from '@/src/lib/utils/logger'
 import { buildDashboardInputForVersion } from '@/src/lib/dashboard/query-factory'
@@ -31,13 +32,22 @@ export async function GET(
     const version = decodeURIComponent(params.version)
     const sdk = searchParams.get('sdk') || 'Java'
     const metric = searchParams.get('metric') || 'duration_average_us'
+    const cluster = searchParams.get('cluster')
     const runIdsParam = searchParams.get('runIds')
     
     // CRITICAL FIX: Detect query type from URL parameters 
     const horizontalScaling = searchParams.get('horizontalScaling')
-    const systemMetric = searchParams.get('systemMetric')
+    const rawSystemMetric = searchParams.get('systemMetric')
+    const systemMetric =
+      rawSystemMetric && getSystemMetricInfo(rawSystemMetric)
+        ? rawSystemMetric
+        : !metric.includes('duration_') && !metric.includes('operations_') && getSystemMetricInfo(metric)
+          ? metric
+          : null
     const transactionThreads = searchParams.get('transactionThreads')
+    const transactionReadonly = searchParams.get('transactionReadonly')
     const reactiveAPI = searchParams.get('reactiveAPI')
+    const kvOperation = searchParams.get('kvOperation')
     
     const hasExplicitRunIds = runIdsParam !== null && runIdsParam.trim() !== ''
     const runIds = hasExplicitRunIds
@@ -55,10 +65,13 @@ export async function GET(
     const baseInput = buildDashboardInputForVersion({
       sdk,
       metric,
+      cluster,
       horizontalScaling,
       systemMetric,
       transactionThreads,
-      reactiveAPI
+      transactionReadonly,
+      reactiveAPI,
+      kvOperation,
     })
     
     const databaseService = await getDatabaseService()
@@ -102,14 +115,17 @@ export async function GET(
       chartResult = await dashboardService.genGraph(versionInput)
       
       const allRuns: any[] = Array.isArray(chartResult?.runs) ? chartResult.runs : []
-      selectedRuns = allRuns
+      selectedRuns = horizontalScaling
+        ? allRuns.filter((run: any) => String(run?.params?.vars?.horizontalScaling ?? '') === horizontalScaling)
+        : allRuns
     }
 
     // Get individual run metrics from the database service with the same trimming as chart
     const runIdsArray = selectedRuns.map((run: any) => run.id)
+    const chartGroupingLabel = horizontalScaling || version
     const aggregatedValue = hasExplicitRunIds
       ? await databaseService.getCohortAggregatedValue(runIdsArray, baseInput)
-      : extractChartAggregatedValue(chartResult, version)
+      : extractChartAggregatedValue(chartResult, chartGroupingLabel)
     const trimmingSeconds = baseInput.trimmingSeconds
     const isSystemMetricSelection =
       Boolean(systemMetric) && !metric.includes('duration_') && !metric.includes('operations_')

@@ -1,6 +1,15 @@
 import type { Pool } from "pg"
+import { SYSTEM_METRICS, SDK_SYSTEM_METRICS, getSystemMetricInfo } from "@/src/lib/config/constants"
 import { HorizontalAxisDynamicUtil } from "@/src/lib/dashboard/axis"
-import { createSystemMetricInput, createKVOperationInput } from "@/src/lib/dashboard/queries"
+import {
+  createSystemMetricInput,
+  createKVOperationInput,
+  createHorizontalScalingInput,
+  createTransactionInput,
+  createTransactionReadOnlyInput,
+  createReactiveAPIInput,
+  createHorizontalScalingReactiveInput,
+} from "@/src/lib/dashboard/queries"
 import {
   buildRunsWithBucketsQuery,
   buildRunsWithMetricsQuery,
@@ -10,6 +19,7 @@ import {
   extractChartAggregatedValue,
   NUMERIC_JSON_VALUE_PATTERN,
 } from "@/src/lib/dashboard/graph-builders"
+import { buildDashboardInputForVersion } from "@/src/lib/dashboard/query-factory"
 import {
   ResultType,
   type DatabaseCompare,
@@ -20,6 +30,12 @@ import {
 } from "@/src/lib/dashboard/dashboard-query-types"
 import { DatabaseService } from "@/src/lib/database-service"
 import { DataTransformers } from "@/src/shared/data/transformers"
+import {
+  applyQueryTypeSearchParams,
+  getQueryTypeFromInput,
+  isNonVersionGroupingQueryType,
+} from "@/src/shared/charts/query-intent"
+import { resolveBarClusterVersion } from "@/src/shared/charts/use-performance-bar-chart"
 
 const RUN_PRESENT = "11111111-1111-4111-8111-111111111111"
 const RUN_ZERO = "22222222-2222-4222-8222-222222222222"
@@ -28,7 +44,7 @@ const RUN_EXTRA = "44444444-4444-4444-8444-444444444444"
 
 describe("system metric queries and bar transformations", () => {
   test("buildSimplifiedMetricQuery filters missing JSON keys and aggregates run_ids", () => {
-    const input = createSystemMetricInput("C++", "processCpu")
+    const input = createSystemMetricInput("C++", "processCpuTotal")
     expect(input.trimmingSeconds).toBe(0)
     const sql = buildSimplifiedMetricQuery(
       [RUN_PRESENT, RUN_ZERO],
@@ -36,7 +52,7 @@ describe("system metric queries and bar transformations", () => {
       input.yAxes[0] as unknown as VerticalAxisMetric,
       input as unknown as Input
     )
-    expect(sql).toContain("metrics.metrics::jsonb ? 'processCpu'")
+    expect(sql).toContain("metrics.metrics::jsonb ? 'processCpuTotal'")
     expect(sql).toContain(NUMERIC_JSON_VALUE_PATTERN)
     const metricKey = (input.yAxes[0] as unknown as VerticalAxisMetric).metric
     expect(sql).toContain("WHERE metric IS NOT NULL")
@@ -412,5 +428,319 @@ describe("system metric queries and bar transformations", () => {
       { name: "1.2.0", value: 0 },
       { name: "main@34173e4", value: 14.75 },
     ])
+  })
+})
+
+describe("C++ extended system metrics configuration", () => {
+  test("documents processCpu as the Java OperatingSystemMXBean.getProcessCpuLoad()*100 equivalent", () => {
+    const processCpu = SYSTEM_METRICS.find((m) => m.id === "processCpu")
+    expect(processCpu?.metric).toBe("processCpu")
+    expect(processCpu?.description).toContain("getProcessCpuLoad")
+  })
+
+  test("defines C++ extended system metrics and defaultVisible flags", () => {
+    expect(SDK_SYSTEM_METRICS.cpp.map((m) => ({ metric: m.metric, defaultVisible: m.defaultVisible }))).toEqual([
+      { metric: "processCpuTotal", defaultVisible: true },
+      { metric: "processCpuUser", defaultVisible: false },
+      { metric: "processCpuSys", defaultVisible: false },
+      { metric: "maxThreadCpu", defaultVisible: true },
+      { metric: "maxCoreCpu", defaultVisible: false },
+      { metric: "memRssUsedMB", defaultVisible: true },
+    ])
+  })
+
+  test("getSystemMetricInfo resolves labels and units for standard and C++ extended metrics", () => {
+    expect(getSystemMetricInfo("processCpu")).toEqual({ label: "Process CPU", unit: "%" })
+    expect(getSystemMetricInfo("processCpuTotal")).toEqual({ label: "Process CPU (Cumulative)", unit: "%" })
+    expect(getSystemMetricInfo("processCpuUser")).toEqual({ label: "Process CPU (User)", unit: "%" })
+    expect(getSystemMetricInfo("processCpuSys")).toEqual({ label: "Process CPU (Kernel)", unit: "%" })
+    expect(getSystemMetricInfo("maxThreadCpu")).toEqual({ label: "Busiest Thread CPU", unit: "%" })
+    expect(getSystemMetricInfo("maxCoreCpu")).toEqual({ label: "Hottest Host Core CPU", unit: "%" })
+    expect(getSystemMetricInfo("systemCpuSteal")).toEqual({ label: "System CPU Steal", unit: "%" })
+    expect(getSystemMetricInfo("systemCpuIoWait")).toEqual({ label: "System CPU I/O Wait", unit: "%" })
+    expect(getSystemMetricInfo("memRssUsedMB")).toEqual({ label: "RSS Memory Used", unit: "MB" })
+    expect(getSystemMetricInfo("memVmsMB")).toEqual({ label: "VMS Memory", unit: "MB" })
+    expect(getSystemMetricInfo("threadCount")).toEqual({ label: "Thread Count", unit: "" })
+    expect(getSystemMetricInfo("duration_average_us")).toBeNull()
+    expect(getSystemMetricInfo("constructor")).toBeNull()
+    expect(getSystemMetricInfo("toString")).toBeNull()
+    expect(getSystemMetricInfo("__proto__")).toBeNull()
+  })
+
+  test("uses Average merging for CPU percentages, Maximum for memory/threads, and preserves drill-down metric", () => {
+    for (const cpuMetric of [
+      "processCpu",
+      "systemCpu",
+      "processCpuTotal",
+      "processCpuUser",
+      "processCpuSys",
+      "maxThreadCpu",
+      "maxCoreCpu",
+      "systemCpuSteal",
+      "systemCpuIoWait",
+    ]) {
+      const input = createSystemMetricInput("C++", cpuMetric)
+      expect(input.mergingType).toBe("Average")
+      expect(input.yAxes[0]).toEqual({ type: "metric", metric: cpuMetric, yAxisID: "y" })
+
+      const versionInput = buildDashboardInputForVersion({
+        sdk: "C++",
+        metric: cpuMetric,
+        systemMetric: cpuMetric,
+      })
+      expect(versionInput.yAxes[0]).toEqual({ type: "metric", metric: cpuMetric, yAxisID: "y" })
+
+      const tileInput = buildDashboardInputForVersion({
+        sdk: "cpp",
+        metric: cpuMetric,
+        cluster: "7.1.1-3175-enterprise",
+      })
+      expect(tileInput.yAxes[0]).toEqual({ type: "metric", metric: cpuMetric, yAxisID: "y" })
+      expect(tileInput.databaseCompare.impl?.language).toBe("C++")
+      expect(tileInput.databaseCompare.cluster?.version).toBe("7.1.1-3175-enterprise")
+    }
+
+    const untrustedSystemMetric = buildDashboardInputForVersion({
+      sdk: "cpp",
+      metric: "duration_average_us",
+      systemMetric: "bad')--",
+    })
+    expect(untrustedSystemMetric.yAxes[0]).toEqual({
+      type: "buckets",
+      column: "duration_average_us",
+      yAxisID: "y",
+    })
+
+    const inheritedKeyMetric = buildDashboardInputForVersion({
+      sdk: "cpp",
+      metric: "constructor",
+      systemMetric: "toString",
+    })
+    expect(inheritedKeyMetric.yAxes[0]).toEqual({
+      type: "buckets",
+      column: "duration_average_us",
+      yAxisID: "y",
+    })
+
+    const craftedScalingMetric = buildDashboardInputForVersion({
+      sdk: "cpp",
+      metric: "duration_average_us) FROM buckets;--",
+      horizontalScaling: "20",
+    })
+    expect(craftedScalingMetric.yAxes[0]).toEqual({
+      type: "buckets",
+      column: "duration_average_us",
+      yAxisID: "y",
+    })
+
+    const txOpsInput = buildDashboardInputForVersion({
+      sdk: "cpp",
+      metric: "operations_total",
+      transactionThreads: "20",
+    })
+    expect(txOpsInput.yAxes[0]).toEqual({
+      type: "buckets",
+      column: "operations_total",
+      yAxisID: "y",
+    })
+
+    const reactiveOpsInput = buildDashboardInputForVersion({
+      sdk: "cpp",
+      metric: "operations_success",
+      reactiveAPI: "ASYNC",
+    })
+    expect(reactiveOpsInput.yAxes[0]).toEqual({
+      type: "buckets",
+      column: "operations_success",
+      yAxisID: "y",
+    })
+    expect((reactiveOpsInput.databaseCompare.vars as Record<string, unknown>)?.api).toBe("ASYNC")
+    expect(
+      createReactiveAPIInput("C++", "DEFAULT", false, true, undefined, "duration_p95_us").yAxes[0]
+    ).toEqual({
+      type: "buckets",
+      column: "duration_p95_us",
+      yAxisID: "y",
+    })
+    expect(
+      createHorizontalScalingReactiveInput("C++", false, true, undefined, "duration_p99_us").yAxes[0]
+    ).toEqual({
+      type: "buckets",
+      column: "duration_p99_us",
+      yAxisID: "y",
+    })
+
+    expect(resolveBarClusterVersion({}, createSystemMetricInput("C++", "processCpuTotal", false, true, "8.0.0-3777-enterprise"))).toBe(
+      "8.0.0-3777-enterprise"
+    )
+    expect(
+      resolveBarClusterVersion(
+        { clusterVersion: "7.6.6" },
+        createSystemMetricInput("C++", "processCpuTotal", false, true, "8.0.0-3777-enterprise")
+      )
+    ).toBe("7.6.6")
+
+    for (const maxMetric of ["memHeapUsedMB", "memRssUsedMB", "memVmsMB", "threadCount"]) {
+      expect(createSystemMetricInput("C++", maxMetric).mergingType).toBe("Maximum")
+    }
+  })
+
+  test("classifies metric yAxes, preserves precedence, and falls back for non-system columns", () => {
+    expect(getQueryTypeFromInput(createSystemMetricInput("C++", "processCpuTotal"))).toEqual({
+      type: "systemMetric",
+      metric: "processCpuTotal",
+    })
+    expect(getQueryTypeFromInput(createSystemMetricInput("C++", "maxThreadCpu"))).toEqual({
+      type: "systemMetric",
+      metric: "maxThreadCpu",
+    })
+    expect(getQueryTypeFromInput({ yAxes: [{ column: "memRssUsedMB" }] })).toEqual({
+      type: "systemMetric",
+      metric: "memRssUsedMB",
+    })
+    expect(
+      getQueryTypeFromInput({
+        vars: { horizontalScaling: 20, experimentName: "horizontalScaling" },
+        yAxes: [{ type: "metric", metric: "processCpuTotal" }],
+      })
+    ).toBe("horizontalScaling")
+    expect(getQueryTypeFromInput({ yAxes: [{ column: "duration_average_us" }] })).toBe("kvOperation")
+
+    // KV, blocking API, reactive API, and horizontal scaling with operations_total must not misclassify as transactions
+    const kvOpsTotal = createKVOperationInput("Java", "get", false, true, "operations_total")
+    expect(getQueryTypeFromInput(kvOpsTotal)).toBe("kvOperation")
+    expect(isNonVersionGroupingQueryType(getQueryTypeFromInput(kvOpsTotal))).toBe(false)
+
+    const blockingOpsTotal = createReactiveAPIInput("Java", "DEFAULT", false, true, undefined, "operations_total")
+    const blockingType = getQueryTypeFromInput(blockingOpsTotal)
+    expect(blockingType).toEqual({ type: "reactiveAPI", api: "DEFAULT" })
+    expect(isNonVersionGroupingQueryType(blockingType)).toBe(false)
+    const blockingParams = new URLSearchParams()
+    applyQueryTypeSearchParams(blockingParams, blockingType)
+    expect(Object.fromEntries(blockingParams.entries())).toEqual({ reactiveAPI: "DEFAULT" })
+    const blockingRebuilt = buildDashboardInputForVersion({
+      sdk: "java",
+      metric: "operations_total",
+      reactiveAPI: blockingParams.get("reactiveAPI"),
+    })
+    expect((blockingRebuilt.databaseCompare.vars as Record<string, unknown>)?.api).toBe("DEFAULT")
+    expect((blockingRebuilt.databaseCompare.vars as Record<string, unknown>)?.poolSize).toBe(10000)
+    expect(blockingRebuilt.yAxes[0]).toEqual({ type: "buckets", column: "operations_total", yAxisID: "y" })
+
+    const reactiveOpsTotal = createReactiveAPIInput("Java", "ASYNC", false, true, undefined, "operations_total")
+    const reactiveType = getQueryTypeFromInput(reactiveOpsTotal)
+    expect(reactiveType).toBe("reactiveAPI")
+    expect(isNonVersionGroupingQueryType(reactiveType)).toBe(false)
+    const reactiveParams = new URLSearchParams()
+    applyQueryTypeSearchParams(reactiveParams, reactiveType)
+    expect(Object.fromEntries(reactiveParams.entries())).toEqual({ reactiveAPI: "ASYNC" })
+
+    const scalingOpsTotal = createHorizontalScalingInput("Java", false, true, "operations_total")
+    const scalingType = getQueryTypeFromInput(scalingOpsTotal)
+    expect(scalingType).toBe("horizontalScaling")
+    expect(isNonVersionGroupingQueryType(scalingType)).toBe(true)
+    const scalingParams = new URLSearchParams()
+    applyQueryTypeSearchParams(scalingParams, scalingType, "20")
+    expect(Object.fromEntries(scalingParams.entries())).toEqual({ horizontalScaling: "20" })
+
+    const reactiveScalingOpsTotal = createHorizontalScalingReactiveInput(
+      "Java",
+      false,
+      true,
+      undefined,
+      "operations_total"
+    )
+    const reactiveScalingType = getQueryTypeFromInput(reactiveScalingOpsTotal)
+    expect(reactiveScalingType).toEqual({ type: "horizontalScaling", api: "ASYNC" })
+    expect(isNonVersionGroupingQueryType(reactiveScalingType)).toBe(true)
+    const reactiveScalingParams = new URLSearchParams()
+    applyQueryTypeSearchParams(reactiveScalingParams, reactiveScalingType, "20")
+    expect(Object.fromEntries(reactiveScalingParams.entries())).toEqual({
+      horizontalScaling: "20",
+      reactiveAPI: "ASYNC",
+    })
+    const reactiveScalingRebuilt = buildDashboardInputForVersion({
+      sdk: "java",
+      metric: "operations_total",
+      horizontalScaling: reactiveScalingParams.get("horizontalScaling"),
+      reactiveAPI: reactiveScalingParams.get("reactiveAPI"),
+    })
+    expect((reactiveScalingRebuilt.hAxis as { databaseField?: string }).databaseField).toBe(
+      "vars.horizontalScaling"
+    )
+    expect((reactiveScalingRebuilt.databaseCompare.vars as Record<string, unknown>)?.api).toBe("ASYNC")
+    expect((reactiveScalingRebuilt.databaseCompare.vars as Record<string, unknown>)?.experimentName).toBe(
+      "horizontalScaling"
+    )
+    expect(reactiveScalingRebuilt.yAxes[0]).toEqual({
+      type: "buckets",
+      column: "operations_total",
+      yAxisID: "y",
+    })
+
+    expect(getQueryTypeFromInput(createTransactionInput("Java", 20, false, true, undefined, "operations_total"))).toEqual({
+      type: "transaction",
+      threads: 20,
+    })
+    const txWrite1Duration = createTransactionInput("Java", 1, false, true, undefined, "duration_average_us")
+    const txWrite1Type = getQueryTypeFromInput(txWrite1Duration)
+    expect(txWrite1Type).toEqual({ type: "transaction", threads: 1 })
+    expect(isNonVersionGroupingQueryType(txWrite1Type)).toBe(false)
+    const txWrite1Params = new URLSearchParams()
+    applyQueryTypeSearchParams(txWrite1Params, txWrite1Type)
+    expect(Object.fromEntries(txWrite1Params.entries())).toEqual({ transactionThreads: "1" })
+    const txWrite1Rebuilt = buildDashboardInputForVersion({
+      sdk: "java",
+      metric: "duration_average_us",
+      transactionThreads: txWrite1Params.get("transactionThreads"),
+      transactionReadonly: txWrite1Params.get("transactionReadonly"),
+    })
+    expect((txWrite1Rebuilt.databaseCompare.vars as Record<string, unknown>)?.horizontalScaling).toBe(1)
+    expect(
+      ((txWrite1Rebuilt.databaseCompare.workload as { operations?: Array<{ transaction?: { ops?: unknown[] } }> })
+        .operations?.[0]?.transaction?.ops ?? []).length
+    ).toBe(2)
+    expect(txWrite1Rebuilt.yAxes[0]).toEqual({ type: "buckets", column: "duration_average_us", yAxisID: "y" })
+
+    const txReadonlyInput = createTransactionReadOnlyInput("Java", 1, false, true, undefined, "duration_p95_us")
+    const txReadonlyType = getQueryTypeFromInput(txReadonlyInput)
+    expect(txReadonlyType).toEqual({
+      type: "transaction",
+      threads: 1,
+      readonly: true,
+    })
+    const txReadonlyParams = new URLSearchParams()
+    applyQueryTypeSearchParams(txReadonlyParams, txReadonlyType)
+    expect(Object.fromEntries(txReadonlyParams.entries())).toEqual({
+      transactionThreads: "1",
+      transactionReadonly: "true",
+    })
+    const txReadonlyRebuilt = buildDashboardInputForVersion({
+      sdk: "java",
+      metric: "duration_p95_us",
+      transactionThreads: txReadonlyParams.get("transactionThreads"),
+      transactionReadonly: txReadonlyParams.get("transactionReadonly"),
+    })
+    expect((txReadonlyRebuilt.databaseCompare.vars as Record<string, unknown>)?.horizontalScaling).toBe(1)
+    expect(
+      ((txReadonlyRebuilt.databaseCompare.workload as { operations?: Array<{ transaction?: { ops?: Array<{ op?: string }> } }> })
+        .operations?.[0]?.transaction?.ops ?? []).map((o) => o.op)
+    ).toEqual(["get"])
+    expect(txReadonlyRebuilt.yAxes[0]).toEqual({ type: "buckets", column: "duration_p95_us", yAxisID: "y" })
+
+    const kvReplaceInput = createKVOperationInput("C++", "replace", false, true, "operations_total")
+    const kvReplaceType = getQueryTypeFromInput(kvReplaceInput)
+    expect(kvReplaceType).toEqual({ type: "kvOperation", operation: "replace" })
+    const kvReplaceParams = new URLSearchParams()
+    applyQueryTypeSearchParams(kvReplaceParams, kvReplaceType)
+    expect(Object.fromEntries(kvReplaceParams.entries())).toEqual({ kvOperation: "replace" })
+    const kvReplaceRebuilt = buildDashboardInputForVersion({
+      sdk: "cpp",
+      metric: "operations_total",
+      kvOperation: kvReplaceParams.get("kvOperation"),
+    })
+    expect(
+      (kvReplaceRebuilt.databaseCompare.workload as { operations?: Array<{ op?: string }> }).operations?.[0]?.op
+    ).toBe("replace")
   })
 })
