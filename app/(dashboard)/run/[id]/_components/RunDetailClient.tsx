@@ -28,7 +28,7 @@ interface RunDetailClientProps {
 
 export default function RunDetailClient({ runData, runMetrics, runBuckets }: RunDetailClientProps) {
   const searchParams = useSearchParams()
-  const metric = searchParams.get("metric") || "duration_average_us"
+  const rawMetric = searchParams.get("metric")
   const sdk = searchParams.get("sdk") || "kotlin"
 
   const [activeTab, setActiveTab] = useState("overview")
@@ -216,6 +216,7 @@ export default function RunDetailClient({ runData, runMetrics, runBuckets }: Run
               runId={runData.id}
               title="Performance Metrics"
               showAllMetrics={false}
+              initialMetric={rawMetric || undefined}
               graphId="runGraph"
             />
           </CardContent>
